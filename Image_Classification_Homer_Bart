@@ -1,0 +1,128 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import transforms
+from torch.utils.data import DataLoader
+from sklearn.model_selection import train_test_split
+from PIL import Image
+import os, glob
+
+# Define custom dataset class
+class SimpleImageDataset(torch.utils.data.Dataset):
+    def __init__(self, file_paths, labels, transform=None):
+        self.file_paths = file_paths
+        self.labels = labels
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.file_paths)
+
+    def __getitem__(self, idx):
+        img = Image.open(self.file_paths[idx]).convert('RGB')
+        if self.transform:
+            img = self.transform(img)
+        label = self.labels[idx]
+        return img, label
+
+# Load dataset function
+def load_dataset(data_dir):
+    classes = {'Homer': 0, 'Bart': 1}
+    file_paths, labels = [], []
+
+    for class_name, class_label in classes.items():
+        paths = glob.glob(os.path.join(data_dir, class_name, '*.bmp'))
+        file_paths.extend(paths)
+        labels.extend([class_label] * len(paths))
+
+    return file_paths, labels
+
+# Data augmentation and transformation
+transform = transforms.Compose([
+    transforms.Resize((64, 64)),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(10),
+    transforms.ColorJitter(brightness=0.5, contrast=0.5),
+    transforms.ToTensor(),
+])
+
+# Load and split dataset
+data_dir = '/content/drive/MyDrive/Train'
+file_paths, labels = load_dataset(data_dir)
+X_train, X_test, y_train, y_test = train_test_split(file_paths, labels, test_size=0.1, random_state=42)
+
+# Dataloaders
+train_dataset = SimpleImageDataset(X_train, y_train, transform)
+test_dataset = SimpleImageDataset(X_test, y_test, transforms.Compose([transforms.Resize((64, 64)), transforms.ToTensor()]))
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)  # Smaller batch size for better gradient estimation
+test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
+
+# Neural Network Model with Dropout
+class SimpleNN(nn.Module):
+    def __init__(self):
+        super(SimpleNN, self).__init__()
+        self.fc1 = nn.Linear(64 * 64 * 3, 256)
+        self.fc2 = nn.Linear(256, 128)
+        self.fc3 = nn.Linear(128, 64)
+        self.fc4 = nn.Linear(64, 32)
+        self.fc5 = nn.Linear(32, 1)
+        self.dropout = nn.Dropout(0.5)  # Dropout to prevent overfitting
+
+    def forward(self, x):
+        x = x.view(-1, 64 * 64 * 3)  # Flatten image
+        x = torch.relu(self.fc1(x))
+        x = self.dropout(x)           # Apply dropout after first layer
+        x = torch.relu(self.fc2(x))
+        x = torch.relu(self.fc3(x))
+        x = torch.relu(self.fc4(x))
+        x = torch.sigmoid(self.fc5(x))  # Sigmoid for binary output
+        return x
+
+# Initialize model, loss function, and optimizer
+model = SimpleNN()
+criterion = nn.BCELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.1)
+
+# Training loop with learning rate scheduling and early stopping
+num_epochs = 200
+best_accuracy = 0.0
+patience = 10  # Early stopping patience
+epochs_no_improve = 0
+
+for epoch in range(num_epochs):
+    model.train()
+    for images, labels in train_loader:
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs.view(-1), torch.tensor(labels, dtype=torch.float32))
+        loss.backward()
+        optimizer.step()
+
+    scheduler.step()  # Adjust learning rate
+
+    # Evaluation on test set
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for images, labels in test_loader:
+            outputs = model(images)
+            predicted = (outputs.view(-1) > 0.5).float()
+            total += labels.size(0)
+            correct += (predicted == torch.tensor(labels, dtype=torch.float32)).sum().item()
+
+    accuracy = correct / total
+    print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}, Test Accuracy: {accuracy:.4f}')
+
+    # Early stopping logic
+    if accuracy > best_accuracy:
+        best_accuracy = accuracy
+        epochs_no_improve = 0
+    else:
+        epochs_no_improve += 1
+
+    if epochs_no_improve == patience:
+        print(f'Early stopping after {epoch+1} epochs. Best accuracy: {best_accuracy:.4f}')
+        break
+
+print(f'Final Test Accuracy: {best_accuracy:.4f}')
